@@ -1,0 +1,88 @@
+name: Comment File Contents on Issue
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  comment-file-contents:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - uses: actions/cache@v2
+        with:
+          path: ${{ env.pythonLocation }}
+          key: ${{ env.pythonLocation }}-PyGithub
+
+      - name: Evaluate PyGithub Package
+        run: |
+          python -c "import github" || echo "PyGithub is not existing"
+        continue-on-error: true
+
+      - name: Check if PyGithub is installed
+        id: check-pygithub
+        run: |
+          if python -c "import github" 2>/dev/null; then
+            echo "pygithub_installed=true" >> $GITHUB_OUTPUT
+          else
+            echo "pygithub_installed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install dependencies if PyGithub is missing
+        if: steps.check-pygithub.outputs.pygithub_installed == 'false'
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyGithub
+          pip freeze | grep PyGithub > PyGithub.version
+
+      - name: Comment file contents
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          import os
+          import re
+          from github import Github
+
+          def get_file_content(repo, branch, file_path):
+              try:
+                  content = repo.get_contents(file_path, ref=branch)
+                  return content.decoded_content.decode('utf-8')
+              except Exception as e:
+                  return f"Error retrieving file: {file_path}\nError: {str(e)}"
+
+          g = Github(os.environ['GITHUB_TOKEN'])
+          repo = g.get_repo(os.environ['REPO'])
+          issue = repo.get_issue(number=int(os.environ['ISSUE_NUMBER']))
+
+          body = issue.body
+          print(body)
+          files_section = re.search(r'# Filepath Section(.*?)<!--', body, re.DOTALL)
+
+          if files_section:
+              file_paths = [line.strip()[2:] for line in files_section.group(1).split('\n') if line.strip().startswith('- main/')]
+          else:
+              file_paths = []
+
+          comment = ""
+          for full_path in file_paths:
+              parts = full_path.split('/', 1)
+              if len(parts) == 2:
+                  branch, file_path = parts
+                  content = get_file_content(repo, branch, file_path)
+                  comment += f"{full_path}\n\n```\n{content}\n```\n\n"
+              else:
+                  comment += f"Invalid file path: {full_path}\n\n"
+          if comment:
+              issue.create_comment(comment)
+          else:
+              print("No valid file paths found in the issue body.")
+        shell: python
